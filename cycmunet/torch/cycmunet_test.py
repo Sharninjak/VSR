@@ -110,15 +110,21 @@ for param in model.parameters():
     num_params += param.numel()
 logger_init.info(f"Model has {num_params} parameters.")
 
+# 检查checkpoint文件是否存在
 if not os.path.exists(test_args.checkpoint):
+    # 如果不存在，则输出错误信息并退出程序
     logger_init.error(f"Checkpoint weight {test_args.checkpoint} not exist.")
     exit(1)
+# 加载checkpoint文件
 state_dict = torch.load(test_args.checkpoint, map_location=lambda storage, loc: storage)
 load_result = model.load_state_dict(state_dict, strict=False)
+# 如果有未知的参数，则输出警告信息
 if load_result.unexpected_keys:
     logger_init.warning(f"Unknown parameters ignored: {load_result.unexpected_keys}")
+# 如果有缺失的参数，则输出警告信息
 if load_result.missing_keys:
     logger_init.warning(f"Missing parameters not initialized: {load_result.missing_keys}")
+# 输出加载成功的信息
 logger_init.info("Checkpoint loaded.")
 
 model = model.cuda()
@@ -133,8 +139,6 @@ def rmse(a, b):
 
 
 ssim_module = SSIM(data_range=1.0, nonnegative_ssim=True).cuda()
-
-
 def ssim(a, b):
     return 1 - ssim_module(a, b)
 
@@ -150,8 +154,8 @@ def recursive_cuda(li, force_data_dtype):
 
 
 if __name__ == '__main__':
-    with torch.no_grad():
-        total_loss = [0.0] * 4
+    with torch.no_grad(): # 禁用梯度计算
+        total_loss = [0.0] * 4 # 高清RMSE、低清RMSE、高清SSIM、低清SSIM
         total_iter = len(ds_test)
         with tqdm.tqdm(total=total_iter, desc=f"Test") as progress:
             for it, data in enumerate(ds_test):

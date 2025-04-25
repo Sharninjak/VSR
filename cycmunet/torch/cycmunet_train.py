@@ -131,7 +131,7 @@ ds_train = DataLoader(ds_train,
 
 model = CycMuNet(model_args) # 创建模型
 model.train() # 设置模型为训练模式
-model_updated = False
+model_updated = False # 模型是否更新的标志
 num_params = 0
 # 遍历模型的所有参数(张量) model.parameters()
 for param in model.parameters():
@@ -225,61 +225,75 @@ def rmse(a, b):
     return torch.mean(torch.sqrt((a - b) ** 2 + epsilon))
 
 
-ssim_module = SSIM(data_range=1.0, nonnegative_ssim=True).cuda()
-
-
 # ssim用于计算两个图像的相似度
+ssim_module = SSIM(data_range=1.0, nonnegative_ssim=True).cuda()
 def ssim(a, b):
     return 1 - ssim_module(a, b)
 
-
+# 将输入数据转换为cuda类型并指定数据类型为force_data_dtype
 def recursive_cuda(li, force_data_dtype):
+    # 判断li是否为列表或元组
     if isinstance(li, (list, tuple)):
+        # 如果是，则递归调用recursive_cuda函数，将li中的每个元素转换为cuda类型
         return tuple(recursive_cuda(i, force_data_dtype) for i in li)
     else:
+        # 如果不是，则判断force_data_dtype是否为None
         if force_data_dtype is not None:
+            # 如果不为None，则将li转换为cuda类型，并指定数据类型为force_data_dtype
             return li.cuda().to(force_data_dtype)
         else:
+            # 如果为None，则直接将li转换为cuda类型
             return li.cuda()
 
 
 def train(epoch):
     epoch_loss = 0
-    total_iter = len(ds_train)
-    loss_coeff = [1, 0.5, 1, 0.5]
+    total_iter = len(ds_train) # 获取训练集的长度 ds_train数据加载器
+    loss_coeff = [1, 0.5, 1, 0.5] # 定义损失系数
+    # progress: tqdm进度条 total_iter: 迭代次数 desc: 进度条描述
     with tqdm.tqdm(total=total_iter, desc=f"Epoch {epoch}") as progress:
+        # 遍历训练集
         for it, data in enumerate(ds_train):
-            optimizer.zero_grad()
+            optimizer.zero_grad() # 梯度清零
 
+            # 定义计算损失函数
             def compute_loss(force_data_dtype=None):
+                # 将数据放入GPU中 高频分量(hf0,hf1,hf2)和低频分量(lf0,lf1,lf2)
                 (hf0, hf1, hf2), (lf0, lf1, lf2) = recursive_cuda(data, force_data_dtype)
+                # hf0,hf1,hf2,lf1转换为rgb lf0,lf2转换为yuv
                 if Dataset.pix_type == 'yuv':
                     target = [cvt.yuv2rgb(*inp) for inp in (hf0, hf1, hf2, lf1)]
                 else:
                     target = [hf0, hf1, hf2, lf1]
 
+                # 当迭代次数是预览间隔的倍数时，生成预览图 只处理批次中的第一张图用于预览
                 if it % preview_interval == 0:
                     if Dataset.pix_type == 'yuv':
+                        # 将yuv转换为rgb，并插值放大 为了将图像转换为与hf0、hf1、hf2相同的大小
+                        # nearest最近邻插值算法，速度快但质量较低，适合预览
+                        # detach()将张量从计算图中分离出来,不需要为预览图像计算梯度,cpu()将其移动到CPU上
                         org = [F.interpolate(cvt.yuv2rgb(y[0:1], uv[0:1]),
                                              scale_factor=(model_args.upscale_factor, model_args.upscale_factor),
                                              mode='nearest').detach().float().cpu()
-                               for y, uv in (lf0, lf1, lf2)]
+                               for y, uv in (lf0, lf1, lf2)] # 三帧低分辨率
                     else:
                         org = [F.interpolate(lf[0:1],
                                              scale_factor=(model_args.upscale_factor, model_args.upscale_factor),
                                              mode='nearest').detach().float().cpu()
                                for lf in (lf0, lf1, lf2)]
-
+                        
+                # lf0,lf2转换为yuv
                 if Dataset.pix_type == 'rgb':
                     lf0, lf2 = cvt.rgb2yuv(lf0), cvt.rgb2yuv(lf2)
 
-                t0 = time.perf_counter()
-                lf0, lf2 = norm.normalize_yuv_420(*lf0), norm.normalize_yuv_420(*lf2)
-                outs = model(lf0, lf2, batch_mode='batch')
+                t0 = time.perf_counter() # 计时1
+                lf0, lf2 = norm.normalize_yuv_420(*lf0), norm.normalize_yuv_420(*lf2) # 归一化
+                outs = model(lf0, lf2, batch_mode='batch') # 将处理后的输入数据传入模型进行前向计算 批处理模式
 
-                t1 = time.perf_counter()
+                t1 = time.perf_counter() # 计时2
                 actual = [cvt.yuv2rgb(*norm.denormalize_yuv_420(*out)) for out in outs]
-
+                
+                # 计算损失
                 if train_args.loss_type == 'rmse':
                     loss = [rmse(a, t) * c for a, t, c in zip(actual, target, loss_coeff)]
                 elif train_args.loss_type == 'ssim':
@@ -289,8 +303,9 @@ def train(epoch):
 
                 assert not any(torch.any(torch.isnan(i)).item() for i in loss)
 
-                t2 = time.perf_counter()
+                t2 = time.perf_counter() # 计时3
 
+                # 定期生成预览
                 if it % preview_interval == 0:
                     out = [i[0:1].detach().float().cpu() for i in actual[:3]]
                     ref = [i[0:1].detach().float().cpu() for i in target[:3]]
@@ -300,25 +315,26 @@ def train(epoch):
                                                      value_range=(0, 1), nrow=nrow, padding=0)
 
                 return loss, t1 - t0, t2 - t1
-
+            
             if train_args.autocast:
+                # 启用自动混合精度AMP
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
                     loss, t_forward, t_loss = compute_loss(torch.float16)
             else:
                 loss, t_forward, t_loss = compute_loss()
 
             total_loss = sum(loss)
-            epoch_loss += total_loss.item()
+            epoch_loss += total_loss.item() # .item():将单元素张量转换为Python标量
 
             t3 = time.perf_counter()
-            total_loss.backward()
-            optimizer.step()
-            scheduler.step()
-            t_backward = time.perf_counter() - t3
+            total_loss.backward() # 自动微分计算梯度（反向传播）
+            optimizer.step() # 根据梯度更新模型参数
+            scheduler.step() # 更新学习率调度器
+            t_backward = time.perf_counter() - t3 # 反向传播时间
 
             global model_updated
-            model_updated = True
-
+            model_updated = True # 标记模型已更新
+            # 更新进度条
             progress.set_postfix(ordered_dict={
                 "loss": f"{total_loss.item():.4f}",
                 "lr": f"{optimizer.param_groups[0]['lr']:.6e}",
@@ -331,13 +347,14 @@ def train(epoch):
     logger.info(f"Epoch {epoch} Complete: Avg. Loss: {epoch_loss / total_iter:.4f}")
 
 
+# 保存模型checkpoint
 def save_model(epoch):
     if epoch == -1:
         name = "snapshot"
     else:
         name = f"epoch_{epoch}"
     if not os.path.exists(save_path):
-        os.makedirs(save_path)
+        os.makedirs(save_path) # 创建保存路径
     output_path = save_path / f"{save_prefix}_{name}.pth"
     torch.save(model.state_dict(), output_path)
     logger.info(f"Checkpoint saved to {output_path}")
